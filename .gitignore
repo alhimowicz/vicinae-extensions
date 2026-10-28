@@ -1,0 +1,4 @@
+node_modules/
+dist/
+__pycache__/
+vicinae-env.d.ts

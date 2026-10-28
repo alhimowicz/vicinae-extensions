@@ -1,0 +1,385 @@
+diff --git a/src/server/CMakeLists.txt b/src/server/CMakeLists.txt
+index 3742e0d..701862d 100644
+--- a/src/server/CMakeLists.txt
++++ b/src/server/CMakeLists.txt
+@@ -543,6 +543,8 @@ set(SRCS
+ 	src/builtins/root/root-search-model.cpp
+ 	src/builtins/root/root-search-sources.hpp
+ 	src/builtins/root/root-search-sources.cpp
++	src/builtins/root/calendar-events.hpp
++	src/builtins/root/calendar-events.cpp
+ 	src/ui/views/drag-utils.hpp
+ 	src/ui/views/drag-utils.cpp
+ 	src/ui/views/section-source.hpp
+@@ -1494,6 +1496,8 @@ if (BUILD_TESTS AND UNIX AND NOT APPLE)
+ 		src/services/clipboard/clipboard-mime.cpp
+ 		tests/pactl-audio-control.cpp
+ 		tests/clipboard-mime.cpp
++		tests/calendar-events.cpp
++		src/builtins/root/calendar-events.cpp
+ 	)
+ 	target_link_libraries(${TEST_TARGET} PRIVATE vicinae::common Qt6::Concurrent glaze::glaze)
+ 	target_link_libraries(${TEST_TARGET} PRIVATE Catch2::Catch2WithMain Qt6::Core Qt6::Gui)
+diff --git a/src/server/src/builtins/root/root-search-model.cpp b/src/server/src/builtins/root/root-search-model.cpp
+index fa76e0b..7db627a 100644
+--- a/src/server/src/builtins/root/root-search-model.cpp
++++ b/src/server/src/builtins/root/root-search-model.cpp
+@@ -7,6 +7,7 @@
+ #include "services/files-service/file-service.hpp"
+ #include "services/news/news-service.hpp"
+ #include "theme/theme.hpp"
++#include "vicinae.hpp"
+ #include <filesystem>
+ #include <utility>
+ 
+@@ -55,6 +56,7 @@ RootSearchModel::RootSearchModel(const ViewScope &scope, QObject *parent)
+   });
+ 
+   m_updateSource = new RootUpdateSection(m_updateService);
++  m_calendarSource = new RootCalendarSection;
+   m_linkSource = new RootLinkSection;
+   m_calcSource = new RootCalculatorSection;
+   m_newsSource = new RootNewsSection;
+@@ -63,6 +65,7 @@ RootSearchModel::RootSearchModel(const ViewScope &scope, QObject *parent)
+   m_filesSource = new RootFilesSection(m_appDb);
+   m_fallbackSource = new RootFallbackSection(m_manager);
+ 
++  addSource(m_calendarSource);
+   addSource(m_updateSource);
+   addSource(m_linkSource);
+   addSource(m_calcSource);
+@@ -72,7 +75,19 @@ RootSearchModel::RootSearchModel(const ViewScope &scope, QObject *parent)
+   addSource(m_filesSource);
+   addSource(m_fallbackSource);
+ 
+-  setFilter({});
++  m_calendarWatcher.addPath(QString::fromStdString((Omnicast::dataDir() / "support/calendar").string()));
++  connect(&m_calendarWatcher, &QFileSystemWatcher::directoryChanged, this, &RootSearchModel::refresh);
++  connect(scope.appContext()->navigation.get(), &NavigationController::windowVisiblityChanged, this,
++          [this](bool visible) {
++            if (visible) refresh();
++          });
++  m_calendarTimer.setInterval(30s);
++  connect(&m_calendarTimer, &QTimer::timeout, this, [this]() {
++    if (this->scope().appContext()->navigation->isWindowOpened()) refresh();
++  });
++  m_calendarTimer.start();
++
++  rerunSearch();
+ }
+ 
+ void RootSearchModel::setFilter(const QString &text) {
+@@ -102,6 +117,7 @@ void RootSearchModel::refresh() {
+ 
+ bool RootSearchModel::rerunSearch() {
+   auto text = QString::fromStdString(m_query);
++  m_calendarSource->refresh(m_query.empty());
+ 
+   if (isAbsolutePathLike(text)) {
+     std::error_code ec;
+diff --git a/src/server/src/builtins/root/root-search-model.hpp b/src/server/src/builtins/root/root-search-model.hpp
+index fd7418a..8d09453 100644
+--- a/src/server/src/builtins/root/root-search-model.hpp
++++ b/src/server/src/builtins/root/root-search-model.hpp
+@@ -5,6 +5,7 @@
+ #include "services/files-service/abstract-file-indexer.hpp"
+ #include <QFutureWatcher>
+ #include <QTimer>
++#include <QFileSystemWatcher>
+ #include <string>
+ 
+ class AppService;
+@@ -50,6 +51,7 @@ private:
+   config::Manager *m_config;
+ 
+   RootUpdateSection *m_updateSource;
++  RootCalendarSection *m_calendarSource;
+   RootLinkSection *m_linkSource;
+   RootCalculatorSection *m_calcSource;
+   RootNewsSection *m_newsSource;
+@@ -62,6 +64,8 @@ private:
+   QString m_lastCompleterItemId;
+ 
+   QTimer m_fileSearchDebounce;
++  QTimer m_calendarTimer;
++  QFileSystemWatcher m_calendarWatcher;
+   FileSearchWatcher m_fileWatcher;
+   std::string m_calculatorSearchQuery;
+   std::string m_fileSearchQuery;
+diff --git a/src/server/src/builtins/root/root-search-sources.cpp b/src/server/src/builtins/root/root-search-sources.cpp
+index fc29d95..e1fb8c9 100644
+--- a/src/server/src/builtins/root/root-search-sources.cpp
++++ b/src/server/src/builtins/root/root-search-sources.cpp
+@@ -15,6 +15,10 @@
+ #include "theme/theme-file.hpp"
+ #include "utils/utils.hpp"
+ #include <format>
++#include <QDateTime>
++#include <QFile>
++#include <QLocale>
++#include "vicinae.hpp"
+ 
+ namespace root_search {
+ 
+@@ -93,6 +97,74 @@ Keyboard::Shortcut shortcutFor(const RootItemMetadata &meta) {
+ 
+ } // namespace
+ 
++namespace {
++
++class ActivateCalendarEvent : public AbstractAction {
++  Q_DECLARE_TR_FUNCTIONS(ActivateCalendarEvent)
++
++public:
++  explicit ActivateCalendarEvent(QString id, bool details = false)
++      : AbstractAction(details ? tr("Event details") : tr("Open event"), BuiltinIcon::Calendar),
++        m_id(std::move(id)), m_details(details) {}
++
++  void execute(ApplicationContext *ctx) override {
++    LaunchProps props;
++    props.launchContext = glz::generic::object_t{{"eventId", m_id.toStdString()}};
++    if (m_details) props.launchContext->get_object()["show"] = "details";
++    ctx->navigation->activateEntrypoint(
++        {"@alhimowicz/calendar", m_details ? "upcoming-events" : "next-event"},
++        {.props = std::move(props), .toggleIfAlreadyActive = false});
++  }
++
++private:
++  QString m_id;
++  bool m_details;
++};
++
++} // namespace
++
++void RootCalendarSection::refresh(bool visible) {
++  m_events.clear();
++  if (!visible) return;
++  if (!QFile::exists(
++          QString::fromStdString((Omnicast::dataDir() / "extensions/calendar/package.json").string())))
++    return;
++  QFile file(QString::fromStdString((Omnicast::dataDir() / "support/calendar/agenda.json").string()));
++  if (!file.open(QIODevice::ReadOnly) || file.size() > 12 * 1024 * 1024) return;
++  m_events = upcomingCalendarEvents(file.readAll(), QDateTime::currentMSecsSinceEpoch());
++}
++
++QString RootCalendarSection::itemId(int i) const { return QStringLiteral("calendar:") + m_events.at(i).id; }
++QString RootCalendarSection::itemTitle(int i) const { return m_events.at(i).title; }
++QString RootCalendarSection::itemSubtitle(int i) const {
++  const auto &event = m_events.at(i);
++  const auto start = QDateTime::fromMSecsSinceEpoch(event.start);
++  QString time = QLocale().toString(start.time(), QLocale::ShortFormat);
++  if (start.date() != QDate::currentDate()) time = tr("Tomorrow %1").arg(time);
++  return event.calendar.isEmpty() ? time : tr("%1 · %2").arg(time, event.calendar);
++}
++std::optional<ImageURL> RootCalendarSection::itemIcon(int i) const {
++  const QColor color(m_events.at(i).color);
++  auto icon = ImageURL::builtin(BuiltinIcon::Calendar);
++  return color.isValid() ? icon.setFill(color) : icon.setFill(SemanticColor::Accent);
++}
++QVariant RootCalendarSection::customData(int i, int role) const {
++  if (role != AccessoryText) return {};
++  const auto remaining = m_events.at(i).start - QDateTime::currentMSecsSinceEpoch();
++  return remaining <= 0 ? tr("Now") : tr("in %n min", nullptr, static_cast<int>((remaining + 59999) / 60000));
++}
++QHash<int, QByteArray> RootCalendarSection::customRoleNames() const { return root_search::customRoleNames(); }
++QHash<int, QVariant> RootCalendarSection::customRoleDefaults() const {
++  return root_search::customRoleDefaults();
++}
++std::unique_ptr<ActionPanelState> RootCalendarSection::actionPanel(int i) const {
++  auto panel = std::make_unique<ListActionPanelState>();
++  auto section = panel->createSection();
++  section->addAction(new ActivateCalendarEvent(m_events.at(i).id));
++  section->addAction(new ActivateCalendarEvent(m_events.at(i).id, true));
++  return panel;
++}
++
+ QString RootLinkSection::itemId(int) const { return m_link ? m_link->url : QString(); }
+ 
+ QString RootLinkSection::itemTitle(int) const { return m_link ? m_link->url : QString(); }
+diff --git a/src/server/src/builtins/root/root-search-sources.hpp b/src/server/src/builtins/root/root-search-sources.hpp
+index dc60091..3b3c290 100644
+--- a/src/server/src/builtins/root/root-search-sources.hpp
++++ b/src/server/src/builtins/root/root-search-sources.hpp
+@@ -1,4 +1,5 @@
+ #pragma once
++#include "builtins/root/calendar-events.hpp"
+ #include "ui/views/section-source.hpp"
+ #include "services/app-service/abstract-app-db.hpp"
+ #include "services/calculator-service/abstract-calculator-backend.hpp"
+@@ -61,6 +62,26 @@ public:
+   }
+ };
+ 
++class RootCalendarSection : public SectionSource {
++  Q_DECLARE_TR_FUNCTIONS(RootCalendarSection)
++
++public:
++  QString sectionName() const override { return tr("Upcoming"); }
++  int count() const override { return static_cast<int>(m_events.size()); }
++  QString itemId(int i) const override;
++  QString itemTitle(int i) const override;
++  QString itemSubtitle(int i) const override;
++  std::optional<ImageURL> itemIcon(int i) const override;
++  QVariant customData(int i, int role) const override;
++  QHash<int, QByteArray> customRoleNames() const override;
++  QHash<int, QVariant> customRoleDefaults() const override;
++  std::unique_ptr<ActionPanelState> actionPanel(int i) const override;
++  void refresh(bool visible);
++
++private:
++  std::vector<CalendarHomeEvent> m_events;
++};
++
+ class RootLinkSection : public SectionSource {
+   Q_DECLARE_TR_FUNCTIONS(RootLinkSection)
+ public:
+diff --git a/src/server/src/builtins/root/calendar-events.cpp b/src/server/src/builtins/root/calendar-events.cpp
+new file mode 100644
+index 0000000..4011785
+--- /dev/null
++++ b/src/server/src/builtins/root/calendar-events.cpp
+@@ -0,0 +1,51 @@
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <algorithm>
++#include <cmath>
++
++#include "builtins/root/calendar-events.hpp"
++
++std::vector<CalendarHomeEvent> upcomingCalendarEvents(const QByteArray &data, qint64 now) {
++  constexpr qint64 LOOK_AHEAD_MS = 24 * 60 * 60 * 1000;
++  constexpr std::size_t MAX_EVENTS = 3;
++  const auto document = QJsonDocument::fromJson(data);
++  if (!document.isObject()) return {};
++  const auto snapshot = document.object();
++  if (!snapshot.value("events").isArray() || !snapshot.value("calendars").isArray()) return {};
++
++  std::vector<CalendarHomeEvent> events;
++  const auto items = snapshot.value("events").toArray();
++  events.reserve(std::min(static_cast<std::size_t>(items.size()), MAX_EVENTS));
++  for (const auto &item : items) {
++    const auto event = item.toObject();
++    const auto start = event.value("start");
++    const auto end = event.value("end");
++    if (!event.value("id").isString() || !event.value("title").isString() ||
++        !event.value("calendarId").isString() || !event.value("allDay").isBool() ||
++        event.value("allDay").toBool() || !start.isDouble() || !end.isDouble())
++      continue;
++    const double startMs = start.toDouble();
++    const double endMs = end.toDouble();
++    if (!std::isfinite(startMs) || !std::isfinite(endMs) || startMs < 0 || startMs > endMs ||
++        endMs > 8.64e15 || endMs <= now || startMs > now + LOOK_AHEAD_MS)
++      continue;
++    QString calendarName;
++    QString color;
++    for (const auto &value : snapshot.value("calendars").toArray()) {
++      const auto calendar = value.toObject();
++      if (calendar.value("id") == event.value("calendarId")) {
++        calendarName = calendar.value("name").toString();
++        color = calendar.value("color").toString();
++        break;
++      }
++    }
++    if (event.value("id").toString().isEmpty() || event.value("title").toString().isEmpty()) continue;
++    events.emplace_back(event.value("id").toString(), event.value("title").toString(),
++                        std::move(calendarName), std::move(color), static_cast<qint64>(startMs),
++                        static_cast<qint64>(endMs));
++  }
++  std::ranges::stable_sort(events, {}, &CalendarHomeEvent::start);
++  if (events.size() > MAX_EVENTS) events.resize(MAX_EVENTS);
++  return events;
++}
+diff --git a/src/server/src/builtins/root/calendar-events.hpp b/src/server/src/builtins/root/calendar-events.hpp
+new file mode 100644
+index 0000000..26e2bde
+--- /dev/null
++++ b/src/server/src/builtins/root/calendar-events.hpp
+@@ -0,0 +1,16 @@
++#pragma once
++
++#include <QByteArray>
++#include <QString>
++#include <vector>
++
++struct CalendarHomeEvent {
++  QString id;
++  QString title;
++  QString calendar;
++  QString color;
++  qint64 start;
++  qint64 end;
++};
++
++std::vector<CalendarHomeEvent> upcomingCalendarEvents(const QByteArray &data, qint64 now);
+diff --git a/src/server/tests/calendar-events.cpp b/src/server/tests/calendar-events.cpp
+new file mode 100644
+index 0000000..276d63c
+--- /dev/null
++++ b/src/server/tests/calendar-events.cpp
+@@ -0,0 +1,65 @@
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <catch2/catch_test_macros.hpp>
++
++#include "builtins/root/calendar-events.hpp"
++
++namespace {
++constexpr qint64 NOW = 1793178000000;
++
++QJsonObject event(const QString &id, qint64 start, qint64 end, bool allDay = false) {
++  return {{"id", id},
++          {"title", QStringLiteral("Event %1").arg(id)},
++          {"calendarId", "work"},
++          {"start", start},
++          {"end", end},
++          {"allDay", allDay}};
++}
++
++QByteArray snapshot(const QJsonArray &events) {
++  return QJsonDocument(
++             QJsonObject{{"events", events},
++                         {"calendars",
++                          QJsonArray{QJsonObject{{"id", "work"}, {"name", "Work"}, {"color", "#3584e4"}}}}})
++      .toJson();
++}
++} // namespace
++
++TEST_CASE("calendar home shows real upcoming events with source metadata") {
++  const auto events = upcomingCalendarEvents(snapshot({event("soon", NOW + 600000, NOW + 1200000)}), NOW);
++  REQUIRE(events.size() == 1);
++  REQUIRE(events.front().id == "soon");
++  REQUIRE(events.front().title == "Event soon");
++  REQUIRE(events.front().calendar == "Work");
++  REQUIRE(events.front().color == "#3584e4");
++}
++
++TEST_CASE("calendar home omits ended, all-day and distant events") {
++  const auto events = upcomingCalendarEvents(
++      snapshot({event("ended", NOW - 600000, NOW), event("all-day", NOW, NOW + 86400000, true),
++                event("distant", NOW + 86400001, NOW + 90000000)}),
++      NOW);
++  REQUIRE(events.empty());
++}
++
++TEST_CASE("calendar home keeps ongoing events and limits results to the earliest three") {
++  const auto events = upcomingCalendarEvents(
++      snapshot({event("third", NOW + 300000, NOW + 900000), event("fourth", NOW + 400000, NOW + 900000),
++                event("second", NOW + 100000, NOW + 900000), event("ongoing", NOW - 100000, NOW + 100000)}),
++      NOW);
++  REQUIRE(events.size() == 3);
++  REQUIRE(events[0].id == "ongoing");
++  REQUIRE(events[1].id == "second");
++  REQUIRE(events[2].id == "third");
++}
++
++TEST_CASE("calendar home rejects malformed calendar data") {
++  REQUIRE(upcomingCalendarEvents("invalid", NOW).empty());
++  REQUIRE(upcomingCalendarEvents("{}", NOW).empty());
++  auto invalid = event("bad", NOW, NOW + 1000);
++  invalid["start"] = "tomorrow";
++  REQUIRE(upcomingCalendarEvents(snapshot({invalid}), NOW).empty());
++  REQUIRE(upcomingCalendarEvents(snapshot({event("negative", -1, NOW + 1000)}), NOW).empty());
++  REQUIRE(upcomingCalendarEvents(snapshot({event("backwards", NOW + 1000, NOW)}), NOW).empty());
++}

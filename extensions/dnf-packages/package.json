@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/vicinaehq/vicinae/refs/heads/main/extra/schemas/extension.json",
+  "name": "dnf-packages",
+  "title": "DNF Packages",
+  "description": "Search, browse, and install DNF packages with a graphical interface",
+  "categories": ["Applications", "System"],
+  "license": "MIT",
+  "author": "alhimowicz",
+  "contributors": [],
+  "pastContributors": [],
+  "icon": "extension_icon.png",
+  "commands": [
+    {
+      "name": "dnf-packages",
+      "title": "DNF Packages",
+      "subtitle": "DNF",
+      "description": "Browse and install DNF packages",
+      "mode": "view"
+    }
+  ],
+  "preferences": [],
+  "scripts": {
+    "build": "vici build",
+    "dev": "vici develop"
+  },
+  "dependencies": {
+    "@vicinae/api": "^0.20.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
