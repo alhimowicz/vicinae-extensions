@@ -1,0 +1,25 @@
+name: Check Web Apps
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/web-apps
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extensions/web-apps/package-lock.json
+      - name: Install system test dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-gi gir1.2-gdkpixbuf-2.0 librsvg2-common desktop-file-utils
+      - run: npm ci --legacy-peer-deps
+      - run: npm run check
+      - run: npx vici build --out dist/web-apps

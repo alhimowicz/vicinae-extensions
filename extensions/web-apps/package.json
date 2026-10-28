@@ -1,0 +1,90 @@
+{
+  "$schema": "https://raw.githubusercontent.com/vicinaehq/vicinae/refs/heads/main/extra/schemas/extension.json",
+  "name": "web-apps",
+  "title": "Web Apps",
+  "description": "Create and manage website apps with browser profiles, custom icons, optional PWA installation and borderless WebKit windows.",
+  "categories": [
+    "Applications",
+    "Web",
+    "Productivity"
+  ],
+  "license": "MIT",
+  "author": "alhimowicz",
+  "icon": "icon.png",
+  "commands": [
+    {
+      "name": "create-web-app",
+      "title": "Create Web App",
+      "description": "Add a website to Vicinae and GNOME with its own window and icon",
+      "keywords": [
+        "website",
+        "pwa",
+        "install",
+        "chrome"
+      ],
+      "mode": "view"
+    },
+    {
+      "name": "web-apps",
+      "title": "Web Apps",
+      "description": "Open, edit or remove your web app launchers",
+      "keywords": [
+        "website",
+        "pwa",
+        "manage",
+        "chrome"
+      ],
+      "mode": "view"
+    }
+  ],
+  "scripts": {
+    "prepare": "node scripts/build-worker.mjs",
+    "build": "node scripts/build-worker.mjs && vici build",
+    "dev": "node scripts/build-worker.mjs && vici develop",
+    "lint": "vici lint",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "check": "npm run lint && npm run typecheck && npm test",
+    "pretest": "node scripts/build-worker.mjs"
+  },
+  "dependencies": {
+    "@vicinae/api": "^0.29.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "esbuild": "^0.25.12",
+    "typescript": "^5.9.3"
+  },
+  "version": "1.0.0",
+  "platforms": [
+    "Linux"
+  ],
+  "contributors": [],
+  "pastContributors": [],
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "preferences": [
+    {
+      "name": "browserExecutable",
+      "type": "file",
+      "title": "Custom Browser Executable",
+      "description": "Optional native Chromium-based browser executable. Set its user-data directory too. Leave both empty for automatic browser discovery.",
+      "required": false
+    },
+    {
+      "name": "browserDataDirectory",
+      "type": "directory",
+      "title": "Custom Browser User-data Directory",
+      "description": "Directory containing Local State and your browser profiles, such as ~/.config/chromium. Required with a custom executable.",
+      "required": false
+    },
+    {
+      "name": "pythonPath",
+      "type": "file",
+      "title": "Python 3 Interpreter",
+      "description": "Optional Python interpreter with PyGObject. Automatically detected from PATH when empty. Used for icons, PWA detection and optional GTK/WebKit windows.",
+      "required": false
+    }
+  ]
+}

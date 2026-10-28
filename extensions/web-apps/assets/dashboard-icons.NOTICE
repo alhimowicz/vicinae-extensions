@@ -1,0 +1,6 @@
+The bundled dashboard-icons.json name and alias index is derived from
+Dashboard Icons by homarr-labs and its contributors:
+https://github.com/homarr-labs/dashboard-icons
+
+The index is bundled for local icon matching; matching artwork is downloaded
+on demand. The upstream Apache License 2.0 is in dashboard-icons.LICENSE.
